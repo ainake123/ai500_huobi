@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  ai500-api:
+    build: .
+    container_name: ai500-service
+    ports:
+      - "2234:2234"
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai  # 设置时区
+    networks:
+      - ai_net
+
+networks:
+  ai_net:
+    driver: bridge
