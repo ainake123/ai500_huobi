@@ -1,11 +1,14 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,17 +28,31 @@ const (
 
 // API 响应结构
 type APIResponse struct {
-	Timestamp int64       `json:"timestamp"`
-	Index     float64     `json:"index_value"`
-	Count     int         `json:"count"`
-	Data      []AssetItem `json:"list"`
+	Success bool       `json:"success"`
+	Data    DataResult `json:"data"`
+}
+
+type DataResult struct {
+	Coins []CoinItem `json:"coins"`
+	Count int        `json:"count"`
 }
 
 type AssetItem struct {
-	Rank   int     `json:"rank"`
-	Symbol string  `json:"symbol"`
-	Price  float64 `json:"price"`
-	Volume float64 `json:"volume_24h_usd"` // 估算成交额
+	Rank   int
+	Symbol string
+	Price  float64
+	Volume float64 // 估算成交额
+}
+
+type CoinItem struct {
+	Pair            string  `json:"pair"`
+	Score           float64 `json:"score"`
+	StartTime       int64   `json:"start_time"`
+	StartPrice      float64 `json:"start_price"`
+	LastScore       float64 `json:"last_score"`
+	MaxScore        float64 `json:"max_score"`
+	MaxPrice        float64 `json:"max_price"`
+	IncreasePercent float64 `json:"increase_percent"`
 }
 
 // 全局缓存 (线程安全)
@@ -74,7 +91,7 @@ func handleAI500List(w http.ResponseWriter, r *http.Request) {
 	cacheMutex.RUnlock()
 
 	// 如果缓存为空（服务刚启动），返回提示
-	if data.Timestamp == 0 {
+	if !data.Success {
 		http.Error(w, `{"error": "Data initializing..."}`, http.StatusServiceUnavailable)
 		return
 	}
@@ -87,7 +104,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	cacheMutex.RLock()
-	ready := cache.Timestamp != 0
+	ready := cache.Success
 	cacheMutex.RUnlock()
 
 	status := http.StatusOK
@@ -170,18 +187,60 @@ func updateData() {
 	}
 
 	// 5. 更新缓存
+	coins := buildCoins(items)
 	newResp := APIResponse{
-		Timestamp: time.Now().Unix(),
-		Index:     totalIndex,
-		Count:     len(items),
-		Data:      items,
+		Success: true,
+		Data: DataResult{
+			Coins: coins,
+			Count: len(coins),
+		},
 	}
 
 	cacheMutex.Lock()
 	cache = newResp
 	cacheMutex.Unlock()
-	
+
 	log.Printf("Updated AI500 data. Index: %.2f, Count: %d", totalIndex, len(items))
+}
+
+// 将内部资产结构转换为对外响应格式
+func buildCoins(items []AssetItem) []CoinItem {
+	if len(items) == 0 {
+		return nil
+	}
+
+	maxVol := items[0].Volume
+	start := time.Now().Add(-24 * time.Hour).Unix()
+
+	coins := make([]CoinItem, 0, len(items))
+	for _, it := range items {
+		score := 0.0
+		if maxVol > 0 {
+			score = roundTo(it.Volume/maxVol*100, 1)
+		}
+
+		coins = append(coins, CoinItem{
+			Pair:            strings.ReplaceAll(it.Symbol, "-", ""),
+			Score:           score,
+			StartTime:       start,
+			StartPrice:      it.Price,
+			LastScore:       score,
+			MaxScore:        score,
+			MaxPrice:        it.Price,
+			IncreasePercent: 0,
+		})
+	}
+
+	return coins
+}
+
+// 保留一定位数的小数，默认四舍五入
+func roundTo(val float64, places int) float64 {
+	if places <= 0 {
+		return math.Round(val)
+	}
+	factor := math.Pow(10, float64(places))
+	return math.Round(val*factor) / factor
 }
 
 // ================= 火币 API 工具 =================
@@ -198,7 +257,13 @@ type HuobiResponse struct {
 }
 
 func fetchHuobiMarket() ([]HuobiTicker, error) {
-	client := http.Client{Timeout: 5 * time.Second}
+	// 检查是否跳过 TLS 验证 (仅用于 Docker 调试)
+	tr := &http.Transport{}
+	if os.Getenv("SKIP_TLS_VERIFY") == "true" {
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	client := http.Client{Timeout: 10 * time.Second, Transport: tr}
+
 	resp, err := client.Get(HuobiAPI)
 	if err != nil {
 		return nil, err

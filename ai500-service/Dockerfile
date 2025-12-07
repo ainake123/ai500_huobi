@@ -17,8 +17,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o server main.go
 # 第二阶段：运行
 FROM alpine:latest
 
-# 安装 CA 证书，否则无法请求 HTTPS (火币接口)
-RUN apk --no-cache add ca-certificates
+# 安装并更新 CA 证书，否则无法请求 HTTPS (火币接口)
+RUN apk --no-cache add ca-certificates && update-ca-certificates
 
 WORKDIR /root/
 

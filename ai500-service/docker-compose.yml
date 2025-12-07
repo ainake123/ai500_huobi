@@ -9,6 +9,7 @@ services:
     restart: always
     environment:
       - TZ=Asia/Shanghai  # 设置时区
+      - SKIP_TLS_VERIFY=true  # 跳过TLS验证(调试用)
     networks:
       - ai_net
 
