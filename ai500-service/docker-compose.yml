@@ -6,6 +6,8 @@ services:
     container_name: ai500-service
     ports:
       - "2234:2234"
+    volumes:
+      - ./logs:/root/logs
     restart: always
     environment:
       - TZ=Asia/Shanghai  # 设置时区

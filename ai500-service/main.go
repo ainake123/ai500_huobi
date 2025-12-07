@@ -47,14 +47,21 @@ type AssetItem struct {
 }
 
 type CoinItem struct {
-	Pair            string  `json:"pair"`
-	Score           float64 `json:"score"`
-	StartTime       int64   `json:"start_time"`
-	StartPrice      float64 `json:"start_price"`
-	LastScore       float64 `json:"last_score"`
-	MaxScore        float64 `json:"max_score"`
-	MaxPrice        float64 `json:"max_price"`
-	IncreasePercent float64 `json:"increase_percent"`
+	Pair              string  `json:"pair"`
+	Score             float64 `json:"score"`
+	StartTime         int64   `json:"start_time"`
+	StartPrice        float64 `json:"start_price"`
+	LastScore         float64 `json:"last_score"`
+	MaxScore          float64 `json:"max_score"`
+	MaxPrice          float64 `json:"max_price"`
+	IncreasePercent   float64 `json:"increase_percent"`
+	OIDelta           float64 `json:"oi_delta"`
+	OIDeltaPercent    float64 `json:"oi_delta_percent"`
+	OIDeltaValue      float64 `json:"oi_delta_value"`
+	PriceDeltaPercent float64 `json:"price_delta_percent"`
+	NetLong           float64 `json:"net_long"`
+	NetShort          float64 `json:"net_short"`
+	NetLongShortRatio float64 `json:"net_long_short_ratio"`
 }
 
 // 全局缓存 (线程安全)
@@ -239,14 +246,21 @@ func buildCoins(items []AssetItem) []CoinItem {
 		}
 
 		coins = append(coins, CoinItem{
-			Pair:            strings.ReplaceAll(it.Symbol, "-", ""),
-			Score:           score,
-			StartTime:       start,
-			StartPrice:      it.Price,
-			LastScore:       score,
-			MaxScore:        score,
-			MaxPrice:        it.Price,
-			IncreasePercent: 0,
+			Pair:              strings.ReplaceAll(it.Symbol, "-", ""),
+			Score:             score,
+			StartTime:         start,
+			StartPrice:        it.Price,
+			LastScore:         score,
+			MaxScore:          score,
+			MaxPrice:          it.Price,
+			IncreasePercent:   0,
+			OIDelta:           0,
+			OIDeltaPercent:    0,
+			OIDeltaValue:      0,
+			PriceDeltaPercent: 0,
+			NetLong:           0,
+			NetShort:          0,
+			NetLongShortRatio: 0,
 		})
 	}
 
