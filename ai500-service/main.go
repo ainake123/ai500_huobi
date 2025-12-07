@@ -9,6 +9,8 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,6 +66,8 @@ var (
 // ================= 主程序 =================
 
 func main() {
+	setupLogging()
+
 	// 1. 启动后台数据更新协程
 	go backgroundFetcher()
 
@@ -203,6 +207,21 @@ func updateData() {
 	log.Printf("Updated AI500 data. Index: %.2f, Count: %d", totalIndex, len(items))
 }
 
+// 初始化日志：输出到 stdout 和本地文件
+func setupLogging() {
+	logDir := "logs"
+	writer, err := newRotatingWriter(logDir, "ai500-service", 30)
+	if err != nil {
+		log.Printf("创建日志文件失败，继续使用默认输出: %v", err)
+		return
+	}
+
+	mw := io.MultiWriter(os.Stdout, writer)
+	log.SetOutput(mw)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.Printf("日志初始化完成，目录 %s，按天轮转，保留 30 天", logDir)
+}
+
 // 将内部资产结构转换为对外响应格式
 func buildCoins(items []AssetItem) []CoinItem {
 	if len(items) == 0 {
@@ -241,6 +260,92 @@ func roundTo(val float64, places int) float64 {
 	}
 	factor := math.Pow(10, float64(places))
 	return math.Round(val*factor) / factor
+}
+
+// ================= 日志轮转工具 =================
+
+type rotatingWriter struct {
+	mu        sync.Mutex
+	dir       string
+	prefix    string
+	retention int
+	date      string
+	file      *os.File
+}
+
+func newRotatingWriter(dir, prefix string, retention int) (io.Writer, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+
+	w := &rotatingWriter{
+		dir:       dir,
+		prefix:    prefix,
+		retention: retention,
+	}
+	if err := w.rotateIfNeeded(); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+func (w *rotatingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.rotateIfNeeded(); err != nil {
+		return 0, err
+	}
+	return w.file.Write(p)
+}
+
+func (w *rotatingWriter) rotateIfNeeded() error {
+	today := time.Now().Format("2006-01-02")
+	if w.file != nil && w.date == today {
+		return nil
+	}
+
+	if w.file != nil {
+		_ = w.file.Close()
+	}
+
+	filename := fmt.Sprintf("%s-%s.log", w.prefix, today)
+	path := filepath.Join(w.dir, filename)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	w.file = f
+	w.date = today
+
+	// 清理过期日志
+	w.cleanupExpired()
+
+	return nil
+}
+
+func (w *rotatingWriter) cleanupExpired() {
+	entries, err := os.ReadDir(w.dir)
+	if err != nil {
+		return
+	}
+
+	re := regexp.MustCompile(fmt.Sprintf(`^%s-(\d{4}-\d{2}-\d{2})\.log$`, regexp.QuoteMeta(w.prefix)))
+	cutoff := time.Now().AddDate(0, 0, -w.retention)
+
+	for _, e := range entries {
+		matches := re.FindStringSubmatch(e.Name())
+		if len(matches) != 2 {
+			continue
+		}
+		day, err := time.Parse("2006-01-02", matches[1])
+		if err != nil {
+			continue
+		}
+		if day.Before(cutoff) {
+			_ = os.Remove(filepath.Join(w.dir, e.Name()))
+		}
+	}
 }
 
 // ================= 火币 API 工具 =================
