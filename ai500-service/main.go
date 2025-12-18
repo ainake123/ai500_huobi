@@ -21,9 +21,10 @@ import (
 // ================= 配置 =================
 
 const (
-	ServerPort  = ":2234"
-	HuobiAPI    = "https://api.hbdm.com/linear-swap-ex/market/detail/batch_merged"
-	RefreshRate = 10 * time.Second
+	ServerPort      = ":2234"
+	HuobiAPI        = "https://api.hbdm.com/linear-swap-ex/market/detail/batch_merged"
+	RefreshRate     = 10 * time.Second
+	HistoryFilePath = "data/history.json" // 历史数据持久化文件
 )
 
 // ================= 数据结构 =================
@@ -47,27 +48,31 @@ type AssetItem struct {
 }
 
 type CoinItem struct {
-	Pair              string  `json:"pair"`
-	Score             float64 `json:"score"`
-	StartTime         int64   `json:"start_time"`
-	StartPrice        float64 `json:"start_price"`
-	LastScore         float64 `json:"last_score"`
-	MaxScore          float64 `json:"max_score"`
-	MaxPrice          float64 `json:"max_price"`
-	IncreasePercent   float64 `json:"increase_percent"`
-	OIDelta           float64 `json:"oi_delta"`
-	OIDeltaPercent    float64 `json:"oi_delta_percent"`
-	OIDeltaValue      float64 `json:"oi_delta_value"`
-	PriceDeltaPercent float64 `json:"price_delta_percent"`
-	NetLong           float64 `json:"net_long"`
-	NetShort          float64 `json:"net_short"`
-	NetLongShortRatio float64 `json:"net_long_short_ratio"`
+	Pair            string  `json:"pair"`
+	Score           float64 `json:"score"`
+	StartTime       int64   `json:"start_time"`
+	StartPrice      float64 `json:"start_price"`
+	LastScore       float64 `json:"last_score"`
+	MaxScore        float64 `json:"max_score"`
+	MaxPrice        float64 `json:"max_price"`
+	IncreasePercent float64 `json:"increase_percent"`
+}
+
+// 币种历史数据追踪
+type CoinHistory struct {
+	FirstSeen  time.Time // 首次发现时间
+	StartPrice float64   // 首次价格
+	MaxPrice   float64   // 历史最高价
+	LastScore  float64   // 上一次评分
+	MaxScore   float64   // 历史最高评分
 }
 
 // 全局缓存 (线程安全)
 var (
-	cache      APIResponse
-	cacheMutex sync.RWMutex
+	cache         APIResponse
+	cacheMutex    sync.RWMutex
+	historyCache  = make(map[string]*CoinHistory) // key: pair
+	historyMutex  sync.RWMutex
 )
 
 // ================= 主程序 =================
@@ -75,15 +80,22 @@ var (
 func main() {
 	setupLogging()
 
-	// 1. 启动后台数据更新协程
+	// 1. 加载历史数据
+	if err := loadHistoryFromFile(); err != nil {
+		log.Printf("⚠️  加载历史数据失败: %v（将使用空历史数据）", err)
+	} else {
+		log.Printf("✓ 成功加载历史数据，共 %d 个币种", len(historyCache))
+	}
+
+	// 2. 启动后台数据更新协程
 	go backgroundFetcher()
 
-	// 2. 设置 HTTP 路由
+	// 3. 设置 HTTP 路由
 	http.HandleFunc("/api/ai500/list", handleAI500List)
 	http.HandleFunc("/api/ai500/health", handleHealth)
 
-	// 3. 启动服务器
-	fmt.Printf("?? AI500 Service running at http://127.0.0.1%s/api/ai500/list\n", ServerPort)
+	// 4. 启动服务器
+	fmt.Printf("🚀 AI500 Service running at http://127.0.0.1%s/api/ai500/list\n", ServerPort)
 	if err := http.ListenAndServe(ServerPort, nil); err != nil {
 		log.Fatal(err)
 	}
@@ -211,6 +223,13 @@ func updateData() {
 	cache = newResp
 	cacheMutex.Unlock()
 
+	// 6. 保存历史数据到文件
+	if err := saveHistoryToFile(); err != nil {
+		log.Printf("⚠️  保存历史数据失败: %v", err)
+	} else {
+		log.Printf("✓ 历史数据已保存")
+	}
+
 	log.Printf("Updated AI500 data. Index: %.2f, Count: %d", totalIndex, len(items))
 }
 
@@ -236,31 +255,66 @@ func buildCoins(items []AssetItem) []CoinItem {
 	}
 
 	maxVol := items[0].Volume
-	start := time.Now().Add(-24 * time.Hour).Unix()
+	now := time.Now()
 
 	coins := make([]CoinItem, 0, len(items))
+
+	historyMutex.Lock()
+	defer historyMutex.Unlock()
+
 	for _, it := range items {
-		score := 0.0
+		// 计算当前评分
+		currentScore := 0.0
 		if maxVol > 0 {
-			score = roundTo(it.Volume/maxVol*100, 1)
+			currentScore = roundTo(it.Volume/maxVol*100, 1)
 		}
 
+		// 标准化 pair 名称（去除横杠）
+		pair := strings.ReplaceAll(it.Symbol, "-", "")
+
+		// 获取或创建历史记录
+		history, exists := historyCache[pair]
+		if !exists {
+			// 首次发现该币种
+			history = &CoinHistory{
+				FirstSeen:  now,
+				StartPrice: it.Price,
+				MaxPrice:   it.Price,
+				LastScore:  currentScore,
+				MaxScore:   currentScore,
+			}
+			historyCache[pair] = history
+		} else {
+			// 更新历史最高价
+			if it.Price > history.MaxPrice {
+				history.MaxPrice = it.Price
+			}
+
+			// 更新历史最高评分
+			if currentScore > history.MaxScore {
+				history.MaxScore = currentScore
+			}
+		}
+
+		// 计算涨幅（相对于首次价格）
+		increasePercent := 0.0
+		if history.StartPrice > 0 {
+			increasePercent = roundTo((it.Price-history.StartPrice)/history.StartPrice*100, 2)
+		}
+
+		// 保存当前评分作为下次的 last_score
+		lastScore := history.LastScore
+		history.LastScore = currentScore
+
 		coins = append(coins, CoinItem{
-			Pair:              strings.ReplaceAll(it.Symbol, "-", ""),
-			Score:             score,
-			StartTime:         start,
-			StartPrice:        it.Price,
-			LastScore:         score,
-			MaxScore:          score,
-			MaxPrice:          it.Price,
-			IncreasePercent:   0,
-			OIDelta:           0,
-			OIDeltaPercent:    0,
-			OIDeltaValue:      0,
-			PriceDeltaPercent: 0,
-			NetLong:           0,
-			NetShort:          0,
-			NetLongShortRatio: 0,
+			Pair:            pair,
+			Score:           currentScore,
+			StartTime:       history.FirstSeen.Unix(),
+			StartPrice:      history.StartPrice,
+			LastScore:       lastScore,
+			MaxScore:        history.MaxScore,
+			MaxPrice:        history.MaxPrice,
+			IncreasePercent: increasePercent,
 		})
 	}
 
@@ -415,4 +469,61 @@ func isPerpetual(contractType string) bool {
 	}
 	ct := strings.ToLower(contractType)
 	return ct == "swap" || ct == "perpetual"
+}
+
+// ================= 历史数据持久化 =================
+
+// 保存历史数据到文件
+func saveHistoryToFile() error {
+	historyMutex.RLock()
+	defer historyMutex.RUnlock()
+
+	// 创建目录（如果不存在）
+	dir := filepath.Dir(HistoryFilePath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("创建目录失败: %w", err)
+	}
+
+	// 序列化历史数据
+	data, err := json.MarshalIndent(historyCache, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化失败: %w", err)
+	}
+
+	// 原子写入：先写临时文件，再重命名
+	tempFile := HistoryFilePath + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0o644); err != nil {
+		return fmt.Errorf("写入临时文件失败: %w", err)
+	}
+
+	if err := os.Rename(tempFile, HistoryFilePath); err != nil {
+		_ = os.Remove(tempFile) // 清理临时文件
+		return fmt.Errorf("重命名文件失败: %w", err)
+	}
+
+	return nil
+}
+
+// 从文件加载历史数据
+func loadHistoryFromFile() error {
+	// 检查文件是否存在
+	if _, err := os.Stat(HistoryFilePath); os.IsNotExist(err) {
+		return fmt.Errorf("历史文件不存在: %s", HistoryFilePath)
+	}
+
+	// 读取文件
+	data, err := os.ReadFile(HistoryFilePath)
+	if err != nil {
+		return fmt.Errorf("读取文件失败: %w", err)
+	}
+
+	// 反序列化
+	historyMutex.Lock()
+	defer historyMutex.Unlock()
+
+	if err := json.Unmarshal(data, &historyCache); err != nil {
+		return fmt.Errorf("反序列化失败: %w", err)
+	}
+
+	return nil
 }
